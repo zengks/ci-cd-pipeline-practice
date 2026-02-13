@@ -1,4 +1,5 @@
-name: Release Pipeline
+name: Release & Deploy
+
 on:
   push:
     branches:
@@ -6,22 +7,61 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
   issues: write
+  pull-requests: write
+  packages: write # We need this to push the Docker image
 
 jobs:
+  # JOB 1: RELEASE
   release:
-    name: Release
+    name: Create Release
     runs-on: ubuntu-latest
+    outputs: # Export these variables so Job 2 can use them
+      published: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
           node-version: "20"
+
       - name: Install Dependencies
         run: npm ci
 
       - name: Semantic Release
+        id: semantic # We give this an ID to access its outputs
         uses: cycjimmy/semantic-release-action@v4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # JOB 2: BUILD DOCKER (Only runs if Job 1 published something)
+  build-and-push:
+    name: Build Docker Image
+    needs: release # Wait for Job 1 to finish
+    if: needs.release.outputs.published == 'true' # Only run if a release happened
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Tag it with "latest" AND the specific version (e.g., v1.3.0)
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:v${{ needs.release.outputs.version }}
